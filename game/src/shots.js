@@ -1,79 +1,72 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Screenshot setups: ?shot=<name> puts the live game into a real gameplay
+// state — the same systems the player uses, no staging tricks — so the
+// screenshots are honest renders of the game. Used by shots.json.
+import { MISSIONS } from './missions.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function snapCamera(world, yaw, pitch) {
+  const p = world.player;
+  p.camYaw = yaw;
+  p.camPitch = pitch;
+  p.updateCamera(1, world.camera);
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
+export function applyShot(world, name) {
+  const { player, police, missions, traffic } = world;
+  world.mode = 'playing';
+  world.hud.showScreen('none');
+  if (name === 'chase') {
+    // Cover shot: 3-star chase with the mission objective on the HUD.
+    const car = traffic.parked.find((c) => c.type === 'sports') || traffic.parked[0];
+    car.mesh.position.set(-30, 0, -30);
+    car.heading = 0;
+    player.enterVehicle(car, world);
+    car.speed = 26;
+    world.autoDrive = true;
+    police.setStars(3);
+    // Pursuers staged so the chase is in frame: one head-on ahead, two closing from behind.
+    police.spawnCarAt(-30, -6, Math.PI);
+    police.spawnCarAt(-22, -52, 0);
+    police.spawnCarAt(-38, -58, 0);
+    missions.index = 4;
+    missions.startMission(MISSIONS[4], world);
+    missions.active.step = 2;
+    missions.enterStep(world);
+    snapCamera(world, Math.PI, 0.3);
+  } else if (name === 'explore') {
+    // On foot on the beach boardwalk, palms and ocean, city behind.
+    player.spawn(220, -20);
+    player.camYaw = 0;
+    snapCamera(world, player.camYaw, 0.38);
+  } else if (name === 'drive') {
+    // Fast drive down the coast road.
+    const car = traffic.parked.find((c) => c.type === 'sports') || traffic.parked[0];
+    car.mesh.position.set(210, 0, 60);
+    car.heading = Math.PI;
+    player.enterVehicle(car, world);
+    car.speed = 38;
+    world.autoDrive = true;
+    snapCamera(world, 0, 0.3);
+  } else if (name === 'mission') {
+    // Dockyard shootout: mission 4's kill step, beacon and enemies in view.
+    player.spawn(180, 100);
+    missions.index = 3;
+    missions.startMission(MISSIONS[3], world);
+    player.camYaw = 0;
+    snapCamera(world, player.camYaw, 0.25);
   }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+  // Let one frame settle before the capture.
+  world.hud.update(world);
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+// Runs after the ?sim= fast-forward: stage elements around the player's
+// CURRENT position, so they are in frame at capture time.
+export function postSim(world, name) {
+  if (name !== 'chase') return;
+  const { player, police } = world;
+  const p = player.position;
+  // Fresh pursuers around the player: one head-on ahead, one ahead-left,
+  // one closing from behind-right.
+  police.spawnCarAt(p.x, p.z + 26, Math.PI);
+  police.spawnCarAt(p.x - 9, p.z + 16, Math.PI);
+  police.spawnCarAt(p.x + 9, p.z - 16, 0);
 }
